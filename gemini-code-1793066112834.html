@@ -1,0 +1,576 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive Carbon Cycle Simulation</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #2c3e50;
+            color: white;
+        }
+
+        #game-container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            background: linear-gradient(to bottom, #87CEEB 0%, #E0F6FF 50%, #8FBC8F 50%, #2E8B57 100%);
+        }
+
+        /* Ocean overlay */
+        .ocean-bg {
+            position: absolute;
+            bottom: 0;
+            right: 0;
+            width: 45%;
+            height: 50%;
+            background: linear-gradient(to bottom, #00BFFF, #00008B);
+            border-top-left-radius: 100% 20%;
+            z-index: 0;
+        }
+
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 1;
+        }
+
+        #ui-layer {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 10;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px;
+            border-radius: 10px;
+            max-width: 300px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        }
+
+        h2 { margin-top: 0; font-size: 1.2rem; color: #f1c40f; }
+        
+        .control-group {
+            margin-bottom: 15px;
+            border-bottom: 1px solid #555;
+            padding-bottom: 10px;
+        }
+
+        label { display: block; margin: 5px 0; cursor: pointer; font-size: 0.9rem;}
+        
+        button {
+            background-color: #e74c3c;
+            color: white;
+            border: none;
+            padding: 8px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 2px;
+            font-size: 0.85rem;
+            transition: transform 0.1s;
+        }
+
+        button:active { transform: scale(0.95); }
+        button:hover { background-color: #c0392b; }
+        
+        button.toggle-btn {
+            background-color: #3498db;
+        }
+        button.toggle-btn:hover { background-color: #2980b9; }
+
+        button.active {
+            background-color: #2ecc71;
+            border: 2px solid white;
+        }
+
+        .legend {
+            font-size: 0.8rem;
+            display: flex;
+            gap: 10px;
+            margin-top: 5px;
+        }
+        .dot { width: 10px; height: 10px; display: inline-block; border-radius: 50%; }
+        
+        #molecule-tracker {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            z-index: 10;
+            background: rgba(0,0,0,0.8);
+            padding: 10px;
+            border-radius: 5px;
+            display: none;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <div class="ocean-bg"></div>
+    <canvas id="simCanvas"></canvas>
+
+    <div id="ui-layer">
+        <h2>Carbon Cycle Controls</h2>
+        
+        <div class="control-group">
+            <button id="btn-simple" class="toggle-btn active" onclick="setMode('simple')">Simple Cycle</button>
+            <button id="btn-complex" class="toggle-btn" onclick="setMode('complex')">Complex Cycle</button>
+        </div>
+
+        <div class="control-group">
+            <label><input type="checkbox" id="chk-sinks" onchange="toggleOverlay()"> Show Sinks (Green) / Sources (Red)</label>
+            <label><input type="checkbox" id="chk-follow" onchange="toggleFollow()"> 🔍 Follow Single Molecule</label>
+        </div>
+
+        <div class="control-group">
+            <div style="margin-bottom:5px; font-weight:bold;">Trigger Events:</div>
+            <button onclick="triggerEvent('eruption')">🌋 Eruption</button>
+            <button onclick="triggerEvent('fire')">🔥 Forest Fire</button>
+            <button onclick="triggerEvent('deforest')">🪓 Deforestation</button>
+        </div>
+
+        <div class="legend">
+            <div><span class="dot" style="background:white"></span> Carbon</div>
+            <div><span class="dot" style="background:#f1c40f"></span> Active Tracked</div>
+        </div>
+        <p style="font-size: 0.75rem; color: #aaa; margin-top:5px;">Reservoir bars show stored carbon relative to scale.</p>
+    </div>
+
+    <div id="molecule-tracker">
+        Following Molecule...<br>
+        Current Location: <span id="tracker-loc" style="color:#f1c40f">Atmosphere</span>
+    </div>
+</div>
+
+<script>
+/** * CARBON CYCLE SIMULATION ENGINE
+ */
+
+const canvas = document.getElementById('simCanvas');
+const ctx = canvas.getContext('2d');
+let width, height;
+
+// Simulation State
+let mode = 'simple'; // 'simple' or 'complex'
+let showSinksSources = false;
+let followMode = false;
+let trackedParticle = null;
+
+// Event Flags
+let eventFire = false;
+let eventDeforest = false; // Permanent state until reset
+let eventEruption = false;
+let eruptionTimer = 0;
+let fireTimer = 0;
+
+// Entities (Reservoirs)
+const reservoirs = {
+    atmosphere: { x: 0.5, y: 0.15, label: "Atmosphere", icon: "☁️", color: "#A9A9A9", size: 100, capacity: 100, type: 'sink' },
+    plants:     { x: 0.15, y: 0.55, label: "Vegetation", icon: "🌲", color: "#228B22", size: 60, capacity: 60, type: 'sink' },
+    animals:    { x: 0.30, y: 0.60, label: "Animals",    icon: "🐄", color: "#8B4513", size: 20, capacity: 20, type: 'source' },
+    soil:       { x: 0.15, y: 0.85, label: "Soil",       icon: "🪱", color: "#5D4037", size: 120, capacity: 120, type: 'sink' },
+    industry:   { x: 0.45, y: 0.53, label: "Industry",   icon: "🏭", color: "#555555", size: 10, capacity: 10, type: 'source' },
+    ocean:      { x: 0.80, y: 0.65, label: "Surface Ocean", icon: "🐟", color: "#1E90FF", size: 80, capacity: 80, type: 'sink' },
+    deepOcean:  { x: 0.85, y: 0.90, label: "Deep Ocean", icon: "🐚", color: "#000080", size: 200, capacity: 200, type: 'sink' },
+    fossil:     { x: 0.50, y: 0.90, label: "Fossil Fuels", icon: "🛢️", color: "#2F4F4F", size: 150, capacity: 150, type: 'sink' },
+    volcano:    { x: 0.05, y: 0.50, label: "Volcano",    icon: "🌋", color: "#800000", size: 0, capacity: 0, type: 'source' }
+};
+
+// Paths (Connections)
+// rate: base speed of transfer
+let paths = [];
+
+function definePaths() {
+    // Reset paths
+    paths = [];
+    
+    // --- SIMPLE MODE PATHS ---
+    // Photosynthesis (Air -> Plants)
+    paths.push({ from: 'atmosphere', to: 'plants', rate: 2, color: 'white', active: true });
+    // Respiration (Plants -> Air)
+    paths.push({ from: 'plants', to: 'atmosphere', rate: 1, color: 'white', active: true });
+    // Eating (Plants -> Animals)
+    paths.push({ from: 'plants', to: 'animals', rate: 1, color: 'white', active: true });
+    // Respiration (Animals -> Air)
+    paths.push({ from: 'animals', to: 'atmosphere', rate: 1, color: 'white', active: true });
+    // Diffusion (Air <-> Ocean)
+    paths.push({ from: 'atmosphere', to: 'ocean', rate: 1.5, color: 'white', active: true });
+    paths.push({ from: 'ocean', to: 'atmosphere', rate: 1.5, color: 'white', active: true });
+
+    // --- COMPLEX MODE PATHS ---
+    // Decomposition (Plants -> Soil)
+    paths.push({ from: 'plants', to: 'soil', rate: 0.8, color: 'white', complexOnly: true });
+    // Decomposition (Animals -> Soil)
+    paths.push({ from: 'animals', to: 'soil', rate: 0.8, color: 'white', complexOnly: true });
+    // Soil Respiration (Soil -> Air)
+    paths.push({ from: 'soil', to: 'atmosphere', rate: 0.5, color: 'white', complexOnly: true });
+    // Ocean Circulation (Surface <-> Deep)
+    paths.push({ from: 'ocean', to: 'deepOcean', rate: 0.5, color: 'white', complexOnly: true });
+    paths.push({ from: 'deepOcean', to: 'ocean', rate: 0.5, color: 'white', complexOnly: true });
+    // Fossilization (Deep Ocean -> Fossil / Soil -> Fossil) - simplified
+    paths.push({ from: 'deepOcean', to: 'fossil', rate: 0.1, color: 'white', complexOnly: true });
+    // Human Activity (Fossil -> Industry)
+    paths.push({ from: 'fossil', to: 'industry', rate: 1.5, color: 'white', complexOnly: true });
+    // Emissions (Industry -> Atmosphere)
+    paths.push({ from: 'industry', to: 'atmosphere', rate: 2.5, color: 'white', complexOnly: true });
+    // Natural Event (Volcano -> Atmosphere) - Only active during event usually, but path exists
+    paths.push({ from: 'volcano', to: 'atmosphere', rate: 0, color: 'white', complexOnly: true, id: 'eruption' });
+}
+
+// Particles
+let particles = [];
+
+class Particle {
+    constructor() {
+        this.reset();
+    }
+
+    reset() {
+        // Start mostly in atmosphere or ocean
+        const startKeys = Object.keys(reservoirs).filter(k => k !== 'volcano' && k !== 'industry');
+        this.location = startKeys[Math.floor(Math.random() * startKeys.length)];
+        this.target = null;
+        this.progress = 0;
+        this.speed = 0;
+        this.x = reservoirs[this.location].x * width;
+        this.y = reservoirs[this.location].y * width; // Init position
+        this.isTracked = false;
+    }
+
+    update() {
+        // If holding in a reservoir
+        if (!this.target) {
+            // Find valid paths from current location
+            let validPaths = paths.filter(p => 
+                p.from === this.location && 
+                p.active && 
+                (mode === 'complex' || !p.complexOnly)
+            );
+
+            // Event overrides
+            if (this.location === 'plants' && eventFire) {
+                // Force move to atmosphere rapidly
+                const firePath = validPaths.find(p => p.to === 'atmosphere');
+                if(firePath) {
+                    this.startTravel(firePath, 3.0); 
+                    return;
+                }
+            }
+
+            if (this.location === 'volcano' && eventEruption) {
+                const eruptionPath = paths.find(p => p.id === 'eruption');
+                this.startTravel(eruptionPath, 4.0);
+                return;
+            }
+
+            // Normal Probability check to leave
+            if (Math.random() < 0.01) { 
+                if (validPaths.length > 0) {
+                    const chosenPath = validPaths[Math.floor(Math.random() * validPaths.length)];
+                    
+                    // Deforestation logic: reduce flow TO plants, increase flow FROM plants
+                    if (eventDeforest && chosenPath.to === 'plants') return; 
+
+                    this.startTravel(chosenPath);
+                }
+            }
+        } 
+        // Traveling
+        else {
+            this.progress += this.speed;
+            
+            // Calculate bezier position (simple quadratic for curve)
+            const startX = reservoirs[this.pathData.from].x * width;
+            const startY = reservoirs[this.pathData.from].y * height;
+            const endX = reservoirs[this.pathData.to].x * width;
+            const endY = reservoirs[this.pathData.to].y * height;
+
+            // Control point: mid point elevated to create arc
+            const midX = (startX + endX) / 2;
+            const midY = (startY + endY) / 2 - 50; // Curve up
+
+            // Quadratic Bezier formula
+            const t = this.progress;
+            this.x = (1-t)*(1-t)*startX + 2*(1-t)*t*midX + t*t*endX;
+            this.y = (1-t)*(1-t)*startY + 2*(1-t)*t*midY + t*t*endY;
+
+            if (this.progress >= 1) {
+                this.location = this.pathData.to;
+                this.target = null;
+                this.progress = 0;
+                
+                // Update reservoir counts (visual only)
+                if(reservoirs[this.location].current < reservoirs[this.location].capacity * 1.5) {
+                    reservoirs[this.location].current++;
+                }
+                reservoirs[this.pathData.from].current--;
+            }
+        }
+    }
+
+    startTravel(pathObj, speedMult = 1) {
+        this.target = pathObj.to;
+        this.pathData = pathObj;
+        this.progress = 0;
+        this.speed = (0.005 * pathObj.rate * speedMult) + (Math.random() * 0.002);
+    }
+
+    draw() {
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.isTracked ? 8 : 3, 0, Math.PI * 2);
+        
+        if (this.isTracked) {
+            ctx.fillStyle = '#f1c40f'; // Gold
+            ctx.shadowBlur = 10;
+            ctx.shadowColor = 'white';
+        } else {
+            ctx.fillStyle = (showSinksSources && this.target) ? '#ffffff' : 'rgba(255,255,255,0.7)';
+            ctx.shadowBlur = 0;
+        }
+        
+        // Hide particle if it's inside a reservoir (optional, but looks better if they flow continuously)
+        // We will keep them visible but jitter them slightly in reservoir
+        if (!this.target) {
+            this.x += (Math.random() - 0.5) * 2;
+            this.y += (Math.random() - 0.5) * 2;
+            // Clamp to reservoir area roughly
+            const res = reservoirs[this.location];
+            const rx = res.x * width;
+            const ry = res.y * height;
+            const dist = Math.hypot(this.x - rx, this.y - ry);
+            if (dist > 30) {
+                this.x = rx; 
+                this.y = ry;
+            }
+        }
+
+        ctx.fill();
+        ctx.closePath();
+        ctx.shadowBlur = 0;
+    }
+}
+
+// Initialize
+function init() {
+    resize();
+    definePaths();
+    
+    // Create particles
+    for(let i=0; i<300; i++) {
+        particles.push(new Particle());
+    }
+
+    // Init reservoir current levels
+    for(let key in reservoirs) {
+        reservoirs[key].current = reservoirs[key].capacity / 2;
+    }
+
+    window.addEventListener('resize', resize);
+    requestAnimationFrame(loop);
+}
+
+function resize() {
+    width = window.innerWidth;
+    height = window.innerHeight;
+    canvas.width = width;
+    canvas.height = height;
+}
+
+// Logic Toggles
+function setMode(m) {
+    mode = m;
+    document.getElementById('btn-simple').classList.toggle('active', m === 'simple');
+    document.getElementById('btn-complex').classList.toggle('active', m === 'complex');
+    
+    // Reset specific visuals
+    if (mode === 'simple') {
+        // Move particles from complex-only nodes to atmosphere to prevent them getting stuck
+        particles.forEach(p => {
+            const r = reservoirs[p.location];
+            // If currently in a node that is hidden in simple mode
+            if (['soil', 'deepOcean', 'fossil', 'industry', 'volcano'].includes(p.location)) {
+                p.location = 'atmosphere';
+                p.target = null;
+                p.x = reservoirs.atmosphere.x * width;
+                p.y = reservoirs.atmosphere.y * height;
+            }
+        });
+    }
+}
+
+function toggleOverlay() {
+    showSinksSources = document.getElementById('chk-sinks').checked;
+}
+
+function toggleFollow() {
+    followMode = document.getElementById('chk-follow').checked;
+    const tracker = document.getElementById('molecule-tracker');
+    
+    if (followMode) {
+        // Pick a random particle to follow
+        trackedParticle = particles[Math.floor(Math.random() * particles.length)];
+        trackedParticle.isTracked = true;
+        tracker.style.display = 'block';
+    } else {
+        if (trackedParticle) trackedParticle.isTracked = false;
+        trackedParticle = null;
+        tracker.style.display = 'none';
+    }
+}
+
+function triggerEvent(type) {
+    if (type === 'eruption') {
+        eventEruption = true;
+        eruptionTimer = 100; // frames
+        // Spawn particles in volcano
+        for(let i=0; i<20; i++) {
+            let p = new Particle();
+            p.location = 'volcano';
+            p.x = reservoirs.volcano.x * width;
+            p.y = reservoirs.volcano.y * height;
+            particles.push(p);
+        }
+    }
+    if (type === 'fire') {
+        eventFire = true;
+        fireTimer = 150;
+    }
+    if (type === 'deforest') {
+        eventDeforest = true; // Permanent until reload
+        reservoirs.plants.icon = "🪵"; // Change icon to stump/wood
+        reservoirs.plants.capacity = 10; // Reduce capacity
+    }
+}
+
+// Main Game Loop
+function loop() {
+    ctx.clearRect(0, 0, width, height);
+
+    // 1. Draw Connections (Arrows)
+    paths.forEach(p => {
+        if (mode === 'simple' && p.complexOnly) return;
+
+        const startRes = reservoirs[p.from];
+        const endRes = reservoirs[p.to];
+        
+        // Skip drawing eruption path unless active
+        if (p.id === 'eruption' && !eventEruption) return;
+
+        const sx = startRes.x * width;
+        const sy = startRes.y * height;
+        const ex = endRes.x * width;
+        const ey = endRes.y * height;
+
+        ctx.beginPath();
+        ctx.moveTo(sx, sy);
+        // Curve logic
+        const midX = (sx + ex) / 2;
+        const midY = (sy + ey) / 2 - 50;
+        ctx.quadraticCurveTo(midX, midY, ex, ey);
+
+        // Color Logic
+        if (showSinksSources) {
+            // Source = Red gradient start, Sink = Green gradient end
+            let gradient = ctx.createLinearGradient(sx, sy, ex, ey);
+            gradient.addColorStop(0, reservoirs[p.from].type === 'source' ? '#e74c3c' : '#aaa');
+            gradient.addColorStop(1, reservoirs[p.to].type === 'sink' ? '#2ecc71' : '#aaa');
+            ctx.strokeStyle = gradient;
+            ctx.lineWidth = 3;
+        } else {
+            ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+            ctx.lineWidth = 2;
+        }
+        
+        ctx.stroke();
+    });
+
+    // 2. Draw Reservoirs
+    for (let key in reservoirs) {
+        const r = reservoirs[key];
+        
+        // Hide complex nodes in simple mode
+        if (mode === 'simple' && ['soil', 'deepOcean', 'fossil', 'industry', 'volcano'].includes(key)) continue;
+
+        const rx = r.x * width;
+        const ry = r.y * height;
+
+        // Draw Icon
+        ctx.font = "40px Arial";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        
+        // Visual effects for events
+        if (key === 'volcano' && eventEruption) {
+            ctx.font = (40 + Math.random()*10) + "px Arial";
+        }
+        if (key === 'plants' && eventFire) {
+            ctx.filter = "sepia(1) hue-rotate(-50deg) saturate(5)";
+        }
+
+        ctx.fillText(r.icon, rx, ry);
+        ctx.filter = "none"; // Reset
+
+        // Draw Label
+        ctx.fillStyle = "white";
+        ctx.font = "14px Arial";
+        ctx.fillText(r.label, rx, ry + 30);
+
+        // Draw Reservoir Bar
+        const barWidth = 60;
+        const barHeight = 8;
+        const pct = Math.min(r.current / r.capacity, 1);
+        
+        ctx.fillStyle = "#333";
+        ctx.fillRect(rx - barWidth/2, ry + 45, barWidth, barHeight);
+        
+        // Bar Color
+        let barColor = "#ccc";
+        if (showSinksSources) {
+            barColor = r.type === 'sink' ? '#2ecc71' : (r.type === 'source' ? '#e74c3c' : '#ccc');
+        }
+        if (key === 'plants' && eventFire) barColor = '#e67e22';
+
+        ctx.fillStyle = barColor;
+        ctx.fillRect(rx - barWidth/2, ry + 45, barWidth * pct, barHeight);
+    }
+
+    // 3. Update & Draw Particles
+    particles.forEach(p => {
+        // Skip update if particle is in a hidden node in simple mode
+        if (mode === 'simple' && p.target === null && 
+           ['soil', 'deepOcean', 'fossil', 'industry', 'volcano'].includes(p.location)) {
+               return; 
+        }
+        p.update();
+        p.draw();
+    });
+
+    // 4. Handle Timers
+    if (eventEruption) {
+        eruptionTimer--;
+        if (eruptionTimer <= 0) eventEruption = false;
+    }
+    if (eventFire) {
+        fireTimer--;
+        if (fireTimer <= 0) eventFire = false;
+    }
+
+    // 5. Update UI Text
+    if (followMode && trackedParticle) {
+        const locName = reservoirs[trackedParticle.location] ? reservoirs[trackedParticle.location].label : "Traveling...";
+        document.getElementById('tracker-loc').innerText = trackedParticle.target ? "Moving..." : locName;
+    }
+
+    requestAnimationFrame(loop);
+}
+
+// Start
+init();
+
+</script>
+</body>
+</html>
